@@ -1,0 +1,10 @@
+{
+  "layout": {
+    "auth": {
+      "t1": "Registrar nuevo usuario",
+      "t2": "Iniciar sesión"
+    },
+    "stared": {},
+    "main": {}
+  }
+}

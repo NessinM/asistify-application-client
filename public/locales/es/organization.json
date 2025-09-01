@@ -1,0 +1,29 @@
+{
+  "employee-management": {
+    "add": {
+      "ui": {
+        "t1": "Agregar persona",
+        "t2": "Complete los datos requeridos para agregar una nueva persona a su organizacion",
+        "steps": {
+          "1": {
+            "al1": "Si esta persona trabaja en más de un mercado o una empresa, te sugerimos que lo incluyas en la entidad legal principal."
+          }
+        }
+      },
+      "http": {},
+      "schemas": {
+        "insert": {
+          "email": {
+            "required_error": "El email es requerido",
+            "min": "El email no puede estar vacío",
+            "format": "Formato de email inválido"
+          },
+          "first_name": {},
+          "last_name": {},
+          "contract_start_date": {},
+          "contract_end_date": {}
+        }
+      }
+    }
+  }
+}

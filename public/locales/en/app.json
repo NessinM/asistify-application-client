@@ -1,0 +1,10 @@
+{
+  "layout": {
+    "auth": {
+      "t1": "Register a new user",
+      "t2": "Sign in with email"
+    },
+    "stared": {},
+    "main": {}
+  }
+}
