@@ -2,7 +2,6 @@ import React, { useId, useState } from 'react';
 import { Input } from '@/registry/default/ui/input';
 import { Label } from '@/registry/default/ui/label';
 import { SelectNative } from '@/registry/default/ui/select-native';
-// import { RichTextEditor } from "@/registry/default/ui/rich-text-editor";
 import { DotIcon } from 'lucide-react';
 import { RadioGroup, RadioGroupItem } from '@registry/default/ui/radio-group';
 import { Tag, TagInput } from '@registry/default/ui/tag-input';
@@ -90,7 +89,6 @@ const PersonAddPage: React.FC = () => {
                 </SelectContent>
               </Select>
             </div>
-            {/* <RichTextEditor /> */}
           </div>
         </div>
       </div>

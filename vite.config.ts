@@ -27,11 +27,6 @@ export default defineConfig({
     modules: {
       generateScopedName: '[hash:base64:5]',
     },
-    preprocessorOptions: {
-      scss: {
-        additionalData: '@use "@/registry/default/components/tiptap/index.scss";',
-      },
-    },
   },
   resolve: {
     alias: {
