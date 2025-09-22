@@ -2,30 +2,52 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+
+    <!-- Favicon & Icons -->
     <link rel="icon" type="image/svg+xml" href="/assets/asistify-icon-favicon.ico" />
     <link rel="apple-touch-icon" href="/assets/asistify-icon-favicon.ico" />
     <!-- <link rel="manifest" href="/manifest.webmanifest" /> -->
 
-    <meta name="theme-color" content="#ffff" />
-    <meta name="viewport" content="width=device-width, user-scalable=no" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- Theme & Viewport -->
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+    <meta name="description" content="Asistify - Plataforma gratuita de gestión de asistencia" />
+
+    <!-- Mobile Web App Capable -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="mobile-app-capable" content="yes" />
 
-    <!-- Open Graph Meta Tags -->
+    <!-- Open Graph -->
     <meta property="og:title" content="Asistify" />
-    <meta property="og:description" content="Plataforma gratuita " />
+    <meta property="og:description" content="Plataforma gratuita de gestión de asistencia" />
     <meta
       property="og:image"
       content="https://app.asistify.com/assets/asistify-icon-maskable-icon-512x512.png"
     />
     <meta property="og:url" content="https://app.asistify.com" />
     <meta property="og:type" content="website" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Asistify" />
+    <meta name="twitter:description" content="Plataforma gratuita de gestión de asistencia" />
+    <meta
+      name="twitter:image"
+      content="https://app.asistify.com/assets/asistify-icon-maskable-icon-512x512.png"
+    />
+
+    <!-- Preconnect for faster loading -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
     <title>Asistify</title>
   </head>
+
   <body>
     <div id="root"></div>
+
+    <!-- Preload main bundle for faster rendering -->
+    <link rel="modulepreload" href="/src/main.tsx" />
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -3,29 +3,27 @@ import react from '@vitejs/plugin-react-swc';
 import { fileURLToPath, URL } from 'url';
 import { visualizer } from 'rollup-plugin-visualizer';
 
+const isDev = process.env.VITE_NODE_ENV !== 'production';
+
 export default defineConfig({
   plugins: [
     react(),
-    visualizer({
-      filename: 'dist/bundle-stats.html', // ruta donde genera el reporte
-      open: true, // abre el navegador al terminar build
-      gzipSize: true, // muestra tamaño gzip
-      brotliSize: true, // muestra tamaño brotli
-    }),
-  ],
+    isDev &&
+      visualizer({
+        filename: 'dist/bundle-stats.html',
+        open: true,
+        gzipSize: true,
+        brotliSize: true,
+      }),
+  ].filter(Boolean), // filtramos null en producción
   server: {
     port: 9054,
     strictPort: true,
     host: '0.0.0.0',
     open: '/',
     cors: {
-      origin: '*', // Solo para dev, en prod define tu dominio
+      origin: '*',
       methods: ['GET', 'POST'],
-    },
-  },
-  css: {
-    modules: {
-      generateScopedName: '[hash:base64:5]',
     },
   },
   resolve: {
@@ -44,18 +42,32 @@ export default defineConfig({
       '@registry': fileURLToPath(new URL('./src/registry', import.meta.url)),
     },
   },
+  css: {
+    // solo necesario si mezclas CSS Modules con Tailwind
+    modules: {
+      generateScopedName: '[hash:base64:5]',
+    },
+  },
   build: {
     target: 'es2015',
     outDir: 'dist',
     assetsDir: 'assets',
-    sourcemap: process.env.NODE_ENV !== 'production',
-    minify: 'terser',
-    terserOptions: {
-      compress: {
-        drop_console: true,
-        drop_debugger: true,
+    sourcemap: isDev,
+    minify: 'esbuild', // más rápido que terser, suficiente para React
+    rollupOptions: {
+      output: {
+        chunkFileNames: 'js/[name]-[hash].js',
+        entryFileNames: 'js/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash].[ext]',
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('@radix-ui')) return 'radix';
+            if (id.includes('recharts')) return 'charts';
+            if (id.includes('@tanstack')) return 'tanstack';
+            return 'vendor';
+          }
+        },
       },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any, // Para evitar que TypeScript se queje por los tipos
+    },
   },
 });

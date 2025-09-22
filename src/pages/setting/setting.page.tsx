@@ -181,8 +181,7 @@ const SettingPage: React.FC = () => {
               <div className="flex flex-col leading-tight">
                 <span>Inicio de sesión único (SSO)</span>
                 <span className="text-xs font-normal text-muted-foreground">
-                  Permite a tus empleados/as iniciar sesión en Asistify mediante SAML Single Sign
-                  On
+                  Permite a tus empleados/as iniciar sesión en Asistify mediante SAML Single Sign On
                 </span>
               </div>
             </AccordionTrigger>

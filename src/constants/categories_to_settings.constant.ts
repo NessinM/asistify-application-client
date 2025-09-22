@@ -110,8 +110,7 @@ export const categories: ComponentCategory[] = [
       {
         to: '/settings/external-users',
         name: 'Usuarios externos',
-        description:
-          'Usuarios que no tienen contrato con la empresa pero tienen acceso a Asistify',
+        description: 'Usuarios que no tienen contrato con la empresa pero tienen acceso a Asistify',
         isNew: false,
         icon: Users,
       },
