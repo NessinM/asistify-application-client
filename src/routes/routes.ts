@@ -14,6 +14,7 @@ export const ROUTES = {
     SIGN_UP: '/sign-up',
     VERIFICATION_CODE: '/verify-account',
     FORGOT_PASSWORD: '/forgot-password',
+    ATTENDANCE: '/attendance'
   },
   NOT_FOUND: '*',
 };
