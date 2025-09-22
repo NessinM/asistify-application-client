@@ -8,7 +8,7 @@ import { FACEMESH_TESSELATION } from '../../constants/face_mesh_tesselation.cons
 export default function FaceIDCenteredCard() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const faceCenteredRef = useRef(0); // Tiempo rostro centrado en ms
+  const faceCenteredRef = useRef<{ startTime: number | null }>({ startTime: null });
 
   const [loading, setLoading] = useState(true);
   const [faceDetected, setFaceDetected] = useState(false);
@@ -16,6 +16,17 @@ export default function FaceIDCenteredCard() {
   const totalSteps = 5;
 
   const requiredCenteredTime = 2000; // ms
+  const keyLandmarks = [1, 33, 263, 61, 291]; // nariz, ojos, boca
+
+  const tuplesTesselation = toTuples(FACEMESH_TESSELATION);
+
+  function toTuples(array: number[]): [number, number][] {
+    const tuples: [number, number][] = [];
+    for (let i = 0; i < array.length; i += 2) {
+      if (i + 1 < array.length) tuples.push([array[i], array[i + 1]]);
+    }
+    return tuples;
+  }
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -24,52 +35,44 @@ export default function FaceIDCenteredCard() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const faceMesh = new FaceMesh({
-      locateFile: (file) => {
-        return `/models/mediapipe/face_mesh/${file}`;
-        // return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${file}`;
+    const setCanvasSize = () => {
+      if (videoRef.current) {
+        canvas.width = videoRef.current.videoWidth || 480;
+        canvas.height = videoRef.current.videoHeight || 360;
+      }
+    };
 
-      },
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `/models/mediapipe/face_mesh/${file}`,
     });
 
     faceMesh.setOptions({
       selfieMode: true,
       maxNumFaces: 1,
       refineLandmarks: true,
-      minDetectionConfidence: 0.7,
-      minTrackingConfidence: 0.7,
+      minDetectionConfidence: 0.8,
+      minTrackingConfidence: 0.8,
     });
-
-    // Ajustamos canvas solo al inicio
-    const setCanvasSize = () => {
-      canvas.width = videoRef.current!.videoWidth;
-      canvas.height = videoRef.current!.videoHeight;
-    };
-
-    const keyLandmarks = [1, 33, 263, 61, 291]; // nariz, ojos, boca
 
     faceMesh.onResults((results: Results) => {
       if (!videoRef.current) return;
 
+      setCanvasSize(); // asegúrate de que canvas coincida con video
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      // pinta el video primero
-      ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(results.image!, 0, 0, canvas.width, canvas.height);
 
       if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
         const landmarks = results.multiFaceLandmarks[0];
 
-        drawConnectors(ctx, landmarks, FACEMESH_TESSELATION as unknown as [number, number][], {
+        drawConnectors(ctx, landmarks, tuplesTesselation, {
           color: 'rgba(0,255,128,0.3)',
           lineWidth: 2,
         });
 
-        // Detección usando landmarks clave
         const xs = keyLandmarks.map((i) => landmarks[i].x);
         const ys = keyLandmarks.map((i) => landmarks[i].y);
-
-        const centerX = ((Math.min(...xs) + Math.max(...xs)) / 2) * canvas.width;
-        const centerY = ((Math.min(...ys) + Math.max(...ys)) / 2) * canvas.height;
+        const centerX = (xs.reduce((a, b) => a + b, 0) / xs.length) * canvas.width;
+        const centerY = (ys.reduce((a, b) => a + b, 0) / ys.length) * canvas.height;
 
         const centered =
           centerX > canvas.width * 0.35 &&
@@ -77,27 +80,26 @@ export default function FaceIDCenteredCard() {
           centerY > canvas.height * 0.35 &&
           centerY < canvas.height * 0.65;
 
-        setFaceDetected(centered);
-
-        if (centered) {
-          faceCenteredRef.current += 16; // incremento aproximado por frame
+        if (centered && progress < totalSteps) {
+          if (!faceCenteredRef.current.startTime)
+            faceCenteredRef.current.startTime = performance.now();
+          const elapsed = performance.now() - faceCenteredRef.current.startTime;
+          if (elapsed >= requiredCenteredTime) {
+            setProgress(progress + 1);
+            faceCenteredRef.current.startTime = null;
+          }
         } else {
-          faceCenteredRef.current = 0;
-        }
-
-        if (faceCenteredRef.current >= requiredCenteredTime) {
-          setProgress((p) => Math.min(p + 1, totalSteps));
-          faceCenteredRef.current = 0;
+          faceCenteredRef.current.startTime = null;
         }
       } else {
         setFaceDetected(false);
-        faceCenteredRef.current = 0;
+        faceCenteredRef.current.startTime = null;
       }
     });
 
     const camera = new Camera(videoRef.current, {
       onFrame: async () => {
-        if (videoRef.current && videoRef.current?.readyState >= 2) {
+        if (videoRef.current && videoRef.current.readyState >= 2) {
           await faceMesh.send({ image: videoRef.current });
         }
       },
@@ -105,13 +107,13 @@ export default function FaceIDCenteredCard() {
       height: 360,
     });
 
-    camera.start().then(() => {
-      setCanvasSize();
-      setLoading(false);
-    });
+    camera.start().then(() => setLoading(false));
+    window.addEventListener('resize', setCanvasSize);
 
     return () => {
       camera.stop();
+      faceMesh.close();
+      window.removeEventListener('resize', setCanvasSize);
     };
   }, []);
 
@@ -133,7 +135,6 @@ export default function FaceIDCenteredCard() {
             ref={canvasRef}
             className="absolute top-1/2 left-1/2 w-full h-full rounded-[36px] -translate-x-1/2 -translate-y-1/2"
           />
-
           <svg className="absolute top-1/2 left-1/2 w-[360px] h-[360px] -translate-x-1/2 -translate-y-1/2 -rotate-90">
             <circle
               cx={circleSize / 2}
@@ -153,7 +154,7 @@ export default function FaceIDCenteredCard() {
               strokeDasharray={circumference}
               strokeDashoffset={circumference - (progress / totalSteps) * circumference}
               strokeLinecap="round"
-              className="transition-all duration-500 ease-out"
+              className="transition-all duration-300 ease-out"
             />
             <defs>
               <linearGradient id="gradientStroke" x1="0%" y1="0%" x2="100%" y2="0%">
@@ -162,15 +163,14 @@ export default function FaceIDCenteredCard() {
               </linearGradient>
             </defs>
           </svg>
-
           <motion.div
             animate={{
-              scale: faceDetected ? [1, 1.08, 1] : 1,
+              scale: faceDetected ? [1, 1.03, 1] : 1,
               boxShadow: faceDetected
-                ? '0 0 60px 20px rgba(52,211,153,0.5)'
-                : '0 0 25px 8px rgba(255,255,255,0.2)',
+                ? '0 0 40px 15px rgba(52,211,153,0.4)'
+                : '0 0 20px 8px rgba(255,255,255,0.15)',
             }}
-            transition={{ duration: 0.8 }}
+            transition={{ duration: 0.5 }}
             className={`absolute top-1/2 left-1/2 w-[200px] h-[200px] rounded-[36px] border-4 ${
               faceDetected ? 'border-green-400' : 'border-gray-500'
             } -translate-x-1/2 -translate-y-1/2 flex items-center justify-center`}
@@ -178,7 +178,6 @@ export default function FaceIDCenteredCard() {
             <div className="w-[140px] h-[140px] rounded-[32px] border-2 border-gray-300" />
           </motion.div>
         </div>
-
         <AnimatePresence mode="wait">
           {progress < totalSteps && !loading && (
             <motion.div
