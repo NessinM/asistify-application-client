@@ -8,7 +8,8 @@ import PageSignIn from '@/pages/auth/sign_in.page';
 import PageSignUp from '@/pages/auth/sign_up.page';
 import PageForgotPassword from '@/pages/auth/forgot_password.page';
 import PageConfirmationCode from '@/pages/auth/verification_code.page';
-import PageAttendance from '@/pages/attendance/attendance.page';
+import PageAttendanceSignIn from '@/pages/attendance/attendance_sign_in.page';
+import PageAttendanceRegister from '@/pages/attendance/attendance_register.page';
 
 export const RoutesAuth: React.FC = () => (
   <Routes>
@@ -17,7 +18,8 @@ export const RoutesAuth: React.FC = () => (
       <Route path={ROUTES.public.SIGN_UP} element={<PageSignUp />} />
       <Route path={ROUTES.public.FORGOT_PASSWORD} element={<PageForgotPassword />} />
       <Route path={ROUTES.public.VERIFICATION_CODE} element={<PageConfirmationCode />} />
-      <Route path={ROUTES.public.ATTENDANCE} element={<PageAttendance />} />
+      <Route path={ROUTES.public.ATTENDANCE_SIGN_IN} element={<PageAttendanceSignIn />} />
+      <Route path={ROUTES.public.ATTENDANCE_REGISTER} element={<PageAttendanceRegister />} />
       <Route path="*" element={<PageSignIn />} />
     </Route>
   </Routes>
