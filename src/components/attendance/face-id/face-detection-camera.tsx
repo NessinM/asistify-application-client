@@ -1,8 +1,55 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { Camera } from '@mediapipe/camera_utils';
 import { FaceMesh, Results, NormalizedLandmark } from '@mediapipe/face_mesh';
+import { SelfieSegmentation } from '@mediapipe/selfie_segmentation';
 
-// Props configurables
+/** --- One Euro Filter --- */
+class OneEuroFilter {
+  private freq: number;
+  private minCutoff: number;
+  private beta: number;
+  private dCutoff: number;
+  private xPrev: number | null = null;
+  private dxPrev: number | null = null;
+  private tPrev: number | null = null;
+
+  constructor(freq = 30, minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
+    this.freq = freq;
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.dCutoff = dCutoff;
+  }
+
+  private alpha(cutoff: number, te: number) {
+    const tau = 1.0 / (2 * Math.PI * cutoff);
+    return 1.0 / (1.0 + tau / te);
+  }
+
+  filter(value: number, t: number) {
+    if (this.tPrev == null) {
+      this.tPrev = t;
+      this.xPrev = value;
+      this.dxPrev = 0;
+      return value;
+    }
+    const te = t - this.tPrev;
+    this.tPrev = t;
+
+    // estimate derivative
+    const dx = (value - (this.xPrev ?? value)) / te;
+    const alphaD = this.alpha(this.dCutoff, te);
+    const dxHat = alphaD * dx + (1 - alphaD) * (this.dxPrev ?? dx);
+    this.dxPrev = dxHat;
+
+    const cutoff = this.minCutoff + this.beta * Math.abs(dxHat);
+    const alphaX = this.alpha(cutoff, te);
+    const xHat = alphaX * value + (1 - alphaX) * (this.xPrev ?? value);
+    this.xPrev = xHat;
+
+    return xHat;
+  }
+}
+
 interface FaceDetectorProps {
   width?: number;
   height?: number;
@@ -10,12 +57,14 @@ interface FaceDetectorProps {
   minDetectionConfidence?: number;
   minTrackingConfidence?: number;
   showPoints?: boolean;
+  modelBasePath?: string;
   onFaceDetected?: (data: {
     centered: boolean;
     centerX: number;
     centerY: number;
     distanceFromCenter: number;
-    embeddings?: Float32Array;
+    boundingBox: { x: number; y: number; w: number; h: number };
+    pose: { pitch: number; yaw: number; roll: number };
     landmarks: NormalizedLandmark[];
   }) => void;
 }
@@ -23,34 +72,23 @@ interface FaceDetectorProps {
 export default function FaceDetector({
   width = 640,
   height = 480,
-  maxFaces = 5,
+  maxFaces = 1,
   minDetectionConfidence = 0.85,
   minTrackingConfidence = 0.85,
   showPoints = true,
+  modelBasePath = '/models/mediapipe',
   onFaceDetected,
 }: FaceDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [faceDetectedState, setFaceDetectedState] = useState(false);
   const faceDetectedRef = useRef(false);
+  const filtersRef = useRef<OneEuroFilter[]>([]);
 
-  const [showPointsState, setShowPointsState] = useState(showPoints);
-  const showPointsRef = useRef(showPointsState);
-  useEffect(() => {
-    showPointsRef.current = showPointsState;
-  }, [showPointsState]);
-
-  const prevLandmarksRef = useRef<{ x: number; y: number; z: number }[]>([]);
-  const phases = useRef<number[]>(
-    Array(468)
-      .fill(0)
-      .map(() => Math.random() * 2 * Math.PI)
-  );
+  const segmentationMaskRef = useRef<any>(null);
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
-
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
@@ -61,10 +99,20 @@ export default function FaceDetector({
     canvas.width = width;
     canvas.height = height;
 
-    const faceMesh = new FaceMesh({
-      locateFile: (file) => `/models/mediapipe/face_mesh/${file}`,
+    // ---- Selfie Segmentation ----
+    const selfieSegmentation = new SelfieSegmentation({
+      locateFile: (file) => `${modelBasePath}/selfie_segmentation/${file}`,
+    });
+    selfieSegmentation.setOptions({ modelSelection: 1 });
+
+    selfieSegmentation.onResults((results) => {
+      segmentationMaskRef.current = results.segmentationMask;
     });
 
+    // ---- FaceMesh ----
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `${modelBasePath}/face_mesh/${file}`,
+    });
     faceMesh.setOptions({
       selfieMode: true,
       maxNumFaces: maxFaces,
@@ -73,118 +121,113 @@ export default function FaceDetector({
       minTrackingConfidence,
     });
 
-    const animatePoints = (landmarks: NormalizedLandmark[]) => {
-      if (!video) return;
-      const prev = prevLandmarksRef.current;
-
+    faceMesh.onResults((results: Results) => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Dibujar video espejado
+      // Paso 1: Fondo borroso
       ctx.save();
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+      ctx.filter = 'blur(12px)';
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
-      landmarks.forEach((lm, index) => {
-        const targetX = lm.x * canvas.width;
-        const targetY = lm.y * canvas.height;
-        const targetZ = lm.z;
+      // Paso 2: recortar persona y ponerla nítida
+      if (segmentationMaskRef.current) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.drawImage(segmentationMaskRef.current, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
 
-        const prevX = prev[index]?.x ?? targetX;
-        const prevY = prev[index]?.y ?? targetY;
-        const prevZ = prev[index]?.z ?? targetZ;
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-over';
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+        ctx.globalCompositeOperation = 'source-over';
+      }
 
-        const smoothX = prevX + (targetX - prevX) * 0.35;
-        const smoothY = prevY + (targetY - prevY) * 0.35;
-        const smoothZ = prevZ + (targetZ - prevZ) * 0.35;
-
-        prev[index] = { x: smoothX, y: smoothY, z: smoothZ };
-
-        const radius = 0.7 + 0.14 * Math.sin(performance.now() * 0.01 + phases.current[index]);
-        const brightness = 0.6 + (0.4 * (-smoothZ + 0.1)) / 0.2;
-        const perspectiveRadius = radius * (1 - smoothZ);
-
-        ctx.beginPath();
-        ctx.arc(smoothX, smoothY, perspectiveRadius, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(20,158,163,${brightness})`;
-        ctx.fill();
-      });
-
-      prevLandmarksRef.current = prev;
-    };
-
-    faceMesh.onResults(async (results: Results) => {
+      // Paso 3: detección facial
       const multiFaces = results.multiFaceLandmarks || [];
       if (multiFaces.length === 0) {
         faceDetectedRef.current = false;
-        setFaceDetectedState(false);
-        prevLandmarksRef.current = [];
-        ctx.save();
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
-        ctx.restore();
+        filtersRef.current = [];
         return;
       }
 
-      let bestFaceIndex = 0;
-      let bestScore = -Infinity;
-      multiFaces.forEach((landmarks, i) => {
-        const xs = landmarks.map((lm) => lm.x);
-        const ys = landmarks.map((lm) => lm.y);
-        const widthFace = Math.max(...xs) - Math.min(...xs);
-        const heightFace = Math.max(...ys) - Math.min(...ys);
-        const area = widthFace * heightFace;
-
-        const centerX = (Math.max(...xs) + Math.min(...xs)) / 2;
-        const centerY = (Math.max(...ys) + Math.min(...ys)) / 2;
-        const centerDist = Math.hypot(centerX - 0.5, centerY - 0.5);
-
-        const avgZ = landmarks.reduce((acc, lm) => acc + lm.z, 0) / landmarks.length;
-
-        const score = area * 0.5 - centerDist * 0.3 - avgZ * 0.2;
-        if (score > bestScore) {
-          bestScore = score;
-          bestFaceIndex = i;
-        }
-      });
-
-      const mainFace = multiFaces[bestFaceIndex];
+      const mainFace = multiFaces[0];
       faceDetectedRef.current = true;
-      setFaceDetectedState(true);
 
-      if (showPointsRef.current) animatePoints(mainFace);
-      else {
-        ctx.save();
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
-        ctx.restore();
+      // inicializar filtros si es primera vez
+      if (filtersRef.current.length !== mainFace.length * 3) {
+        filtersRef.current = Array(mainFace.length * 3)
+          .fill(0)
+          .map(() => new OneEuroFilter());
       }
 
-      // Posición de la cara con respecto al centro
-      const xs = mainFace.map((lm) => lm.x);
-      const ys = mainFace.map((lm) => lm.y);
-      const centerX = (Math.max(...xs) + Math.min(...xs)) / 2;
-      const centerY = (Math.max(...ys) + Math.min(...ys)) / 2;
-      const distanceFromCenter = Math.hypot(centerX - 0.5, centerY - 0.5);
-      const centered = distanceFromCenter < 0.1; // margen 10%
+      // suavizar landmarks
+      const t = performance.now() / 1000;
+      const smoothed = mainFace.map((lm, i) => ({
+        x: filtersRef.current[i * 3 + 0].filter(lm.x, t),
+        y: filtersRef.current[i * 3 + 1].filter(lm.y, t),
+        z: filtersRef.current[i * 3 + 2].filter(lm.z, t),
+      }));
 
-      // Embeddings (ejemplo placeholder, integrar tu modelo)
-      let embeddings: Float32Array | undefined;
-      // if(faceEmbeddingModel) embeddings = await faceEmbeddingModel.run(croppedFaceTensor);
+      if (showPoints) {
+        ctx.fillStyle = 'rgba(20,158,163,0.9)';
+        smoothed.forEach((lm) => {
+          const x = (1 - lm.x) * canvas.width; // espejado en X
+          const y = lm.y * canvas.height;
+          ctx.beginPath();
+          ctx.arc(x, y, 1.0, 0, Math.PI * 2); // radio más pequeño
+          ctx.fill();
+        });
+      }
+
+      // Datos extras
+      const xs = smoothed.map((lm) => lm.x);
+      const ys = smoothed.map((lm) => lm.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const distanceFromCenter = Math.hypot(centerX - 0.5, centerY - 0.5);
+      const centered = distanceFromCenter < 0.1;
+
+      // bounding box
+      const boundingBox = {
+        x: minX,
+        y: minY,
+        w: maxX - minX,
+        h: maxY - minY,
+      };
+
+      // pose básica (yaw, pitch, roll aprox.)
+      const leftEye = smoothed[33];
+      const rightEye = smoothed[263];
+      const nose = smoothed[1];
+      const dx = rightEye.x - leftEye.x;
+      const dy = rightEye.y - leftEye.y;
+      const yaw = Math.atan2(dx, dy);
+      const pitch = (nose.y - centerY) * 30;
+      const roll = (nose.x - centerX) * 30;
 
       onFaceDetected?.({
         centered,
         centerX,
         centerY,
         distanceFromCenter,
-        embeddings,
-        landmarks: mainFace,
+        boundingBox,
+        pose: { pitch, yaw, roll },
+        landmarks: smoothed,
       });
     });
 
     const camera = new Camera(video, {
       onFrame: async () => {
-        if (video.readyState >= 2) await faceMesh.send({ image: video });
+        if (video.readyState >= 2) {
+          await selfieSegmentation.send({ image: video });
+          await faceMesh.send({ image: video });
+        }
       },
       width,
       height,
@@ -195,41 +238,33 @@ export default function FaceDetector({
     return () => {
       camera.stop();
       faceMesh.close();
+      selfieSegmentation.close();
     };
-  }, [width, height, maxFaces, minDetectionConfidence, minTrackingConfidence, onFaceDetected]);
+  }, [
+    width,
+    height,
+    maxFaces,
+    minDetectionConfidence,
+    minTrackingConfidence,
+    onFaceDetected,
+    showPoints,
+    modelBasePath,
+  ]);
 
   return (
-    // <div className=" flex flex-col items-center justify-center ">
-
-
-    //   <p
-    //     className={`mt-4 text-xl font-bold ${
-    //       faceDetectedState ? 'text-green-400' : 'text-red-400'
-    //     }`}
-    //   >
-    //     {faceDetectedState ? 'Rostro detectado ✅' : 'No se detecta rostro ❌'}
-    //   </p>
-
-    //   <button
-    //     onClick={() => setShowPointsState((prev) => !prev)}
-    //     className="mt-4 px-4 py-2 bg-gray-800 text-white rounded-lg"
-    //   >
-    //     {showPointsState ? 'Ocultar puntos' : 'Mostrar puntos'}
-    //   </button>
-    // </div>
-     <div className="relative">
-        <video
-          ref={videoRef}
-          className="object-cover rounded-lg"
-          autoPlay
-          playsInline
-          style={{ width, height, transform: 'scaleX(-1)' }}
-        />
-        <canvas
-          ref={canvasRef}
-          className="absolute top-0 left-0 pointer-events-none rounded-lg"
-          style={{ width, height }}
-        />
-      </div>
+    <div className="relative">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        style={{ width, height, transform: 'scaleX(-1)' }}
+        className="object-cover rounded-lg"
+      />
+      <canvas
+        ref={canvasRef}
+        className="absolute top-0 left-0 pointer-events-none rounded-lg"
+        style={{ width, height, transform: 'scaleX(-1)' }}
+      />
+    </div>
   );
 }
