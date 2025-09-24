@@ -2,18 +2,44 @@ import { useEffect, useRef, useState } from 'react';
 import { Camera } from '@mediapipe/camera_utils';
 import { FaceMesh, Results, NormalizedLandmark } from '@mediapipe/face_mesh';
 
-export default function FaceDetector() {
+// Props configurables
+interface FaceDetectorProps {
+  width?: number;
+  height?: number;
+  maxFaces?: number;
+  minDetectionConfidence?: number;
+  minTrackingConfidence?: number;
+  showPoints?: boolean;
+  onFaceDetected?: (data: {
+    centered: boolean;
+    centerX: number;
+    centerY: number;
+    distanceFromCenter: number;
+    embeddings?: Float32Array;
+    landmarks: NormalizedLandmark[];
+  }) => void;
+}
+
+export default function FaceDetector({
+  width = 640,
+  height = 480,
+  maxFaces = 5,
+  minDetectionConfidence = 0.85,
+  minTrackingConfidence = 0.85,
+  showPoints = true,
+  onFaceDetected,
+}: FaceDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const [faceDetectedState, setFaceDetectedState] = useState(false);
   const faceDetectedRef = useRef(false);
 
-  const [showPoints, setShowPoints] = useState(true);
-  const showPointsRef = useRef(showPoints);
+  const [showPointsState, setShowPointsState] = useState(showPoints);
+  const showPointsRef = useRef(showPointsState);
   useEffect(() => {
-    showPointsRef.current = showPoints;
-  }, [showPoints]);
+    showPointsRef.current = showPointsState;
+  }, [showPointsState]);
 
   const prevLandmarksRef = useRef<{ x: number; y: number; z: number }[]>([]);
   const phases = useRef<number[]>(
@@ -30,10 +56,10 @@ export default function FaceDetector() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    video.width = 640;
-    video.height = 480;
-    canvas.width = video.width;
-    canvas.height = video.height;
+    video.width = width;
+    video.height = height;
+    canvas.width = width;
+    canvas.height = height;
 
     const faceMesh = new FaceMesh({
       locateFile: (file) => `/models/mediapipe/face_mesh/${file}`,
@@ -41,29 +67,27 @@ export default function FaceDetector() {
 
     faceMesh.setOptions({
       selfieMode: true,
-      maxNumFaces: 5,
+      maxNumFaces: maxFaces,
       refineLandmarks: true,
-      minDetectionConfidence: 0.85,
-      minTrackingConfidence: 0.85,
+      minDetectionConfidence,
+      minTrackingConfidence,
     });
 
     const animatePoints = (landmarks: NormalizedLandmark[]) => {
       if (!video) return;
-      const width = canvas.width;
-      const height = canvas.height;
       const prev = prevLandmarksRef.current;
 
-      ctx.clearRect(0, 0, width, height);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       // Dibujar video espejado
       ctx.save();
       ctx.scale(-1, 1);
-      ctx.drawImage(video, -width, 0, width, height);
+      ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
       ctx.restore();
 
       landmarks.forEach((lm, index) => {
-        const targetX = lm.x * width; // puntos en coordenadas correctas
-        const targetY = lm.y * height;
+        const targetX = lm.x * canvas.width;
+        const targetY = lm.y * canvas.height;
         const targetZ = lm.z;
 
         const prevX = prev[index]?.x ?? targetX;
@@ -89,13 +113,12 @@ export default function FaceDetector() {
       prevLandmarksRef.current = prev;
     };
 
-    faceMesh.onResults((results: Results) => {
+    faceMesh.onResults(async (results: Results) => {
       const multiFaces = results.multiFaceLandmarks || [];
       if (multiFaces.length === 0) {
         faceDetectedRef.current = false;
         setFaceDetectedState(false);
         prevLandmarksRef.current = [];
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.save();
         ctx.scale(-1, 1);
         ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
@@ -129,23 +152,42 @@ export default function FaceDetector() {
       faceDetectedRef.current = true;
       setFaceDetectedState(true);
 
-      if (showPointsRef.current) {
-        animatePoints(mainFace);
-      } else {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (showPointsRef.current) animatePoints(mainFace);
+      else {
         ctx.save();
         ctx.scale(-1, 1);
         ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
         ctx.restore();
       }
+
+      // Posición de la cara con respecto al centro
+      const xs = mainFace.map((lm) => lm.x);
+      const ys = mainFace.map((lm) => lm.y);
+      const centerX = (Math.max(...xs) + Math.min(...xs)) / 2;
+      const centerY = (Math.max(...ys) + Math.min(...ys)) / 2;
+      const distanceFromCenter = Math.hypot(centerX - 0.5, centerY - 0.5);
+      const centered = distanceFromCenter < 0.1; // margen 10%
+
+      // Embeddings (ejemplo placeholder, integrar tu modelo)
+      let embeddings: Float32Array | undefined;
+      // if(faceEmbeddingModel) embeddings = await faceEmbeddingModel.run(croppedFaceTensor);
+
+      onFaceDetected?.({
+        centered,
+        centerX,
+        centerY,
+        distanceFromCenter,
+        embeddings,
+        landmarks: mainFace,
+      });
     });
 
     const camera = new Camera(video, {
       onFrame: async () => {
         if (video.readyState >= 2) await faceMesh.send({ image: video });
       },
-      width: 640,
-      height: 480,
+      width,
+      height,
     });
 
     camera.start();
@@ -154,39 +196,40 @@ export default function FaceDetector() {
       camera.stop();
       faceMesh.close();
     };
-  }, []);
+  }, [width, height, maxFaces, minDetectionConfidence, minTrackingConfidence, onFaceDetected]);
 
   return (
-    <div className="w-screen h-screen flex flex-col items-center justify-center bg-black">
-      <div className="relative">
+    // <div className=" flex flex-col items-center justify-center ">
+
+
+    //   <p
+    //     className={`mt-4 text-xl font-bold ${
+    //       faceDetectedState ? 'text-green-400' : 'text-red-400'
+    //     }`}
+    //   >
+    //     {faceDetectedState ? 'Rostro detectado ✅' : 'No se detecta rostro ❌'}
+    //   </p>
+
+    //   <button
+    //     onClick={() => setShowPointsState((prev) => !prev)}
+    //     className="mt-4 px-4 py-2 bg-gray-800 text-white rounded-lg"
+    //   >
+    //     {showPointsState ? 'Ocultar puntos' : 'Mostrar puntos'}
+    //   </button>
+    // </div>
+     <div className="relative">
         <video
           ref={videoRef}
           className="object-cover rounded-lg"
           autoPlay
           playsInline
-          style={{ width: 640, height: 480, transform: 'scaleX(-1)' }}
+          style={{ width, height, transform: 'scaleX(-1)' }}
         />
         <canvas
           ref={canvasRef}
           className="absolute top-0 left-0 pointer-events-none rounded-lg"
-          style={{ width: 640, height: 480 }}
+          style={{ width, height }}
         />
       </div>
-
-      <p
-        className={`mt-4 text-xl font-bold ${
-          faceDetectedState ? 'text-green-400' : 'text-red-400'
-        }`}
-      >
-        {faceDetectedState ? 'Rostro detectado ✅' : 'No se detecta rostro ❌'}
-      </p>
-
-      <button
-        onClick={() => setShowPoints((prev) => !prev)}
-        className="mt-4 px-4 py-2 bg-gray-800 text-white rounded-lg"
-      >
-        {showPoints ? 'Ocultar puntos' : 'Mostrar puntos'}
-      </button>
-    </div>
   );
 }
