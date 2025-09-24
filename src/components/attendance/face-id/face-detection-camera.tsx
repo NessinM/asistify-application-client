@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Camera } from '@mediapipe/camera_utils';
-import { FaceMesh, Results } from '@mediapipe/face_mesh';
-// import { drawConnectors } from '@mediapipe/drawing_utils';
-import { FACEMESH_TESSELATION } from '../../../constants/face_mesh_tesselation.constants';
+import { FaceMesh, Results, NormalizedLandmark } from '@mediapipe/face_mesh';
 
 export default function FaceDetector() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -17,12 +15,7 @@ export default function FaceDetector() {
     showPointsRef.current = showPoints;
   }, [showPoints]);
 
-  const tesselationPairs: [number, number][] = [];
-  for (let i = 0; i < FACEMESH_TESSELATION.length; i += 2) {
-    if (i + 1 < FACEMESH_TESSELATION.length) {
-      tesselationPairs.push([FACEMESH_TESSELATION[i], FACEMESH_TESSELATION[i + 1]]);
-    }
-  }
+  const prevLandmarksRef = useRef<{ x: number; y: number; z: number }[]>([]);
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
@@ -37,11 +30,47 @@ export default function FaceDetector() {
 
     faceMesh.setOptions({
       selfieMode: true,
-      maxNumFaces: 1,
+      maxNumFaces: 5,
       refineLandmarks: true,
-      minDetectionConfidence: 0.8,
-      minTrackingConfidence: 0.8,
+      minDetectionConfidence: 0.85,
+      minTrackingConfidence: 0.85,
     });
+
+    const animatePoints = (landmarks: NormalizedLandmark[]) => {
+      const time = performance.now() * 0.006; // más rápido que Date.now()
+      const prev = prevLandmarksRef.current;
+
+      landmarks.forEach((lm, index) => {
+        const targetX = lm.x * canvas.width;
+        const targetY = lm.y * canvas.height;
+        const targetZ = lm.z;
+
+        const prevX = prev[index]?.x ?? targetX;
+        const prevY = prev[index]?.y ?? targetY;
+        const prevZ = prev[index]?.z ?? targetZ;
+
+        // suavizado más rápido (mayor responsividad)
+        const smoothX = prevX + (targetX - prevX) * 0.5;
+        const smoothY = prevY + (targetY - prevY) * 0.5;
+        const smoothZ = prevZ + (targetZ - prevZ) * 0.5;
+
+        prev[index] = { x: smoothX, y: smoothY, z: smoothZ };
+
+        // radio con pulso sutil
+        const radius = 0.6 + 0.15 * Math.sin(time + index);
+
+        // brillo según profundidad z
+        const brightness = 0.7 + (0.3 * (-smoothZ + 0.1)) / 0.2;
+        const color = `rgba(20, 158, 163, ${brightness})`;
+
+        ctx.beginPath();
+        ctx.arc(smoothX, smoothY, radius, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      });
+
+      prevLandmarksRef.current = prev;
+    };
 
     faceMesh.onResults((results: Results) => {
       if (!videoRef.current) return;
@@ -52,28 +81,34 @@ export default function FaceDetector() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(results.image!, 0, 0, canvas.width, canvas.height);
 
-      const hasFace = !!(results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0);
-
-      if (faceDetectedRef.current !== hasFace) {
-        faceDetectedRef.current = hasFace;
-        setFaceDetectedState(hasFace);
+      const multiFaces = results.multiFaceLandmarks || [];
+      if (multiFaces.length === 0) {
+        faceDetectedRef.current = false;
+        setFaceDetectedState(false);
+        return;
       }
 
-      if (hasFace && showPointsRef.current) {
-        const landmarks = results.multiFaceLandmarks![0];
+      // Elegir la cara más cercana según área
+      let bestFaceIndex = 0;
+      let maxArea = 0;
+      multiFaces.forEach((landmarks, i) => {
+        const xs = landmarks.map((lm) => lm.x);
+        const ys = landmarks.map((lm) => lm.y);
+        const width = Math.max(...xs) - Math.min(...xs);
+        const height = Math.max(...ys) - Math.min(...ys);
+        const area = width * height;
+        if (area > maxArea) {
+          maxArea = area;
+          bestFaceIndex = i;
+        }
+      });
 
-        landmarks.forEach((lm, index) => {
-          const x = lm.x * canvas.width;
-          const y = lm.y * canvas.height;
+      const mainFace = multiFaces[bestFaceIndex];
+      faceDetectedRef.current = true;
+      setFaceDetectedState(true);
 
-          // Puntos muy pequeños, pulso mínimo
-          const radius = 0.8 + 0.2 * Math.sin(Date.now() * 0.02 + index);
-
-          ctx.beginPath();
-          ctx.arc(x, y, radius, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(20, 158, 163, 0.7)';
-          ctx.fill();
-        });
+      if (showPointsRef.current) {
+        animatePoints(mainFace);
       }
     });
 
