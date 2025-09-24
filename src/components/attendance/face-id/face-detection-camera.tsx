@@ -35,7 +35,6 @@ class OneEuroFilter {
     const te = t - this.tPrev;
     this.tPrev = t;
 
-    // estimate derivative
     const dx = (value - (this.xPrev ?? value)) / te;
     const alphaD = this.alpha(this.dCutoff, te);
     const dxHat = alphaD * dx + (1 - alphaD) * (this.dxPrev ?? dx);
@@ -58,6 +57,7 @@ interface FaceDetectorProps {
   minTrackingConfidence?: number;
   showPoints?: boolean;
   modelBasePath?: string;
+  enableBlur?: boolean;
   onFaceDetected?: (data: {
     centered: boolean;
     centerX: number;
@@ -77,14 +77,14 @@ export default function FaceDetector({
   minTrackingConfidence = 0.85,
   showPoints = true,
   modelBasePath = '/models/mediapipe',
+  enableBlur = true,
   onFaceDetected,
 }: FaceDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const faceDetectedRef = useRef(false);
-  const filtersRef = useRef<OneEuroFilter[]>([]);
-
+  const filtersRef = useRef<OneEuroFilter[][]>([]);
   const segmentationMaskRef = useRef<any>(null);
 
   useEffect(() => {
@@ -121,19 +121,53 @@ export default function FaceDetector({
       minTrackingConfidence,
     });
 
+    let frameCount = 0;
+
     faceMesh.onResults((results: Results) => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      // Paso 1: Fondo borroso
-      ctx.save();
-      ctx.filter = 'blur(12px)';
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      ctx.restore();
+      const multiFaces = results.multiFaceLandmarks || [];
 
-      // Paso 2: recortar persona y ponerla nítida
+      if (enableBlur) {
+        if (multiFaces.length === 0) {
+          // 🔹 Caso: no hay cara → todo blur
+          ctx.save();
+          ctx.filter = 'blur(12px)';
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
+          return; // no seguimos con máscara ni landmarks
+        }
+
+        // 🔹 Caso: sí hay cara → fondo blur + persona nítida
+        ctx.save();
+        ctx.filter = 'blur(12px)';
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+
+        if (segmentationMaskRef.current) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'destination-out';
+          ctx.filter = 'blur(6px)';
+          ctx.drawImage(segmentationMaskRef.current, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
+
+          ctx.save();
+          ctx.globalCompositeOperation = 'destination-over';
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
+          ctx.globalCompositeOperation = 'source-over';
+        }
+      } else {
+        // 🔹 Caso: desenfoque desactivado → video limpio siempre
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      }
+
+      // Paso 2: Persona nítida con borde suave
       if (segmentationMaskRef.current) {
         ctx.save();
+        ctx.globalAlpha = 0.95;
         ctx.globalCompositeOperation = 'destination-out';
+        if (enableBlur) ctx.filter = 'blur(6px)';
         ctx.drawImage(segmentationMaskRef.current, 0, 0, canvas.width, canvas.height);
         ctx.restore();
 
@@ -145,44 +179,42 @@ export default function FaceDetector({
       }
 
       // Paso 3: detección facial
-      const multiFaces = results.multiFaceLandmarks || [];
+      // const multiFaces = results.multiFaceLandmarks || [];
       if (multiFaces.length === 0) {
         faceDetectedRef.current = false;
-        filtersRef.current = [];
         return;
       }
 
       const mainFace = multiFaces[0];
       faceDetectedRef.current = true;
 
-      // inicializar filtros si es primera vez
-      if (filtersRef.current.length !== mainFace.length * 3) {
-        filtersRef.current = Array(mainFace.length * 3)
-          .fill(0)
-          .map(() => new OneEuroFilter());
+      if (filtersRef.current.length !== mainFace.length) {
+        filtersRef.current = mainFace.map(() => [
+          new OneEuroFilter(),
+          new OneEuroFilter(),
+          new OneEuroFilter(),
+        ]);
       }
 
-      // suavizar landmarks
       const t = performance.now() / 1000;
       const smoothed = mainFace.map((lm, i) => ({
-        x: filtersRef.current[i * 3 + 0].filter(lm.x, t),
-        y: filtersRef.current[i * 3 + 1].filter(lm.y, t),
-        z: filtersRef.current[i * 3 + 2].filter(lm.z, t),
+        x: filtersRef.current[i][0].filter(lm.x, t),
+        y: filtersRef.current[i][1].filter(lm.y, t),
+        z: filtersRef.current[i][2].filter(lm.z, t),
       }));
 
       if (showPoints) {
         ctx.fillStyle = 'rgba(20,158,163,0.9)';
         smoothed.forEach((lm) => {
-          const x = (1 - lm.x) * canvas.width; // espejado en X
+          const x = (1 - lm.x) * canvas.width;
           const y = lm.y * canvas.height;
           ctx.beginPath();
-          ctx.arc(x, y, 1.0, 0, Math.PI * 2); // radio más pequeño
+          ctx.arc(x, y, 1.0, 0, Math.PI * 2);
           ctx.fill();
         });
       }
 
-      // Datos extras
-      const xs = smoothed.map((lm) => lm.x);
+      const xs = smoothed.map((lm) => 1 - lm.x);
       const ys = smoothed.map((lm) => lm.y);
       const minX = Math.min(...xs);
       const maxX = Math.max(...xs);
@@ -193,7 +225,6 @@ export default function FaceDetector({
       const distanceFromCenter = Math.hypot(centerX - 0.5, centerY - 0.5);
       const centered = distanceFromCenter < 0.1;
 
-      // bounding box
       const boundingBox = {
         x: minX,
         y: minY,
@@ -201,7 +232,6 @@ export default function FaceDetector({
         h: maxY - minY,
       };
 
-      // pose básica (yaw, pitch, roll aprox.)
       const leftEye = smoothed[33];
       const rightEye = smoothed[263];
       const nose = smoothed[1];
@@ -225,7 +255,10 @@ export default function FaceDetector({
     const camera = new Camera(video, {
       onFrame: async () => {
         if (video.readyState >= 2) {
-          await selfieSegmentation.send({ image: video });
+          frameCount++;
+          if (frameCount % 3 === 0) {
+            await selfieSegmentation.send({ image: video });
+          }
           await faceMesh.send({ image: video });
         }
       },
@@ -239,6 +272,8 @@ export default function FaceDetector({
       camera.stop();
       faceMesh.close();
       selfieSegmentation.close();
+      filtersRef.current = [];
+      segmentationMaskRef.current = null;
     };
   }, [
     width,
@@ -249,6 +284,7 @@ export default function FaceDetector({
     onFaceDetected,
     showPoints,
     modelBasePath,
+    enableBlur,
   ]);
 
   return (
