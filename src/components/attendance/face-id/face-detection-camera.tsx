@@ -16,13 +16,24 @@ export default function FaceDetector() {
   }, [showPoints]);
 
   const prevLandmarksRef = useRef<{ x: number; y: number; z: number }[]>([]);
+  const phases = useRef<number[]>(
+    Array(468)
+      .fill(0)
+      .map(() => Math.random() * 2 * Math.PI)
+  );
 
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
 
+    const video = videoRef.current;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+
+    video.width = 640;
+    video.height = 480;
+    canvas.width = video.width;
+    canvas.height = video.height;
 
     const faceMesh = new FaceMesh({
       locateFile: (file) => `/models/mediapipe/face_mesh/${file}`,
@@ -37,35 +48,41 @@ export default function FaceDetector() {
     });
 
     const animatePoints = (landmarks: NormalizedLandmark[]) => {
-      const time = performance.now() * 0.006; // más rápido que Date.now()
+      if (!video) return;
+      const width = canvas.width;
+      const height = canvas.height;
       const prev = prevLandmarksRef.current;
 
+      ctx.clearRect(0, 0, width, height);
+
+      // Dibujar video espejado
+      ctx.save();
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, -width, 0, width, height);
+      ctx.restore();
+
       landmarks.forEach((lm, index) => {
-        const targetX = lm.x * canvas.width;
-        const targetY = lm.y * canvas.height;
+        const targetX = lm.x * width; // puntos en coordenadas correctas
+        const targetY = lm.y * height;
         const targetZ = lm.z;
 
         const prevX = prev[index]?.x ?? targetX;
         const prevY = prev[index]?.y ?? targetY;
         const prevZ = prev[index]?.z ?? targetZ;
 
-        // suavizado más rápido (mayor responsividad)
-        const smoothX = prevX + (targetX - prevX) * 0.5;
-        const smoothY = prevY + (targetY - prevY) * 0.5;
-        const smoothZ = prevZ + (targetZ - prevZ) * 0.5;
+        const smoothX = prevX + (targetX - prevX) * 0.35;
+        const smoothY = prevY + (targetY - prevY) * 0.35;
+        const smoothZ = prevZ + (targetZ - prevZ) * 0.35;
 
         prev[index] = { x: smoothX, y: smoothY, z: smoothZ };
 
-        // radio con pulso sutil
-        const radius = 0.6 + 0.15 * Math.sin(time + index);
-
-        // brillo según profundidad z
-        const brightness = 0.7 + (0.3 * (-smoothZ + 0.1)) / 0.2;
-        const color = `rgba(20, 158, 163, ${brightness})`;
+        const radius = 0.7 + 0.14 * Math.sin(performance.now() * 0.01 + phases.current[index]);
+        const brightness = 0.6 + (0.4 * (-smoothZ + 0.1)) / 0.2;
+        const perspectiveRadius = radius * (1 - smoothZ);
 
         ctx.beginPath();
-        ctx.arc(smoothX, smoothY, radius, 0, Math.PI * 2);
-        ctx.fillStyle = color;
+        ctx.arc(smoothX, smoothY, perspectiveRadius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(20,158,163,${brightness})`;
         ctx.fill();
       });
 
@@ -73,32 +90,37 @@ export default function FaceDetector() {
     };
 
     faceMesh.onResults((results: Results) => {
-      if (!videoRef.current) return;
-
-      canvas.width = videoRef.current.videoWidth || 640;
-      canvas.height = videoRef.current.videoHeight || 480;
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(results.image!, 0, 0, canvas.width, canvas.height);
-
       const multiFaces = results.multiFaceLandmarks || [];
       if (multiFaces.length === 0) {
         faceDetectedRef.current = false;
         setFaceDetectedState(false);
+        prevLandmarksRef.current = [];
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+        ctx.restore();
         return;
       }
 
-      // Elegir la cara más cercana según área
       let bestFaceIndex = 0;
-      let maxArea = 0;
+      let bestScore = -Infinity;
       multiFaces.forEach((landmarks, i) => {
         const xs = landmarks.map((lm) => lm.x);
         const ys = landmarks.map((lm) => lm.y);
-        const width = Math.max(...xs) - Math.min(...xs);
-        const height = Math.max(...ys) - Math.min(...ys);
-        const area = width * height;
-        if (area > maxArea) {
-          maxArea = area;
+        const widthFace = Math.max(...xs) - Math.min(...xs);
+        const heightFace = Math.max(...ys) - Math.min(...ys);
+        const area = widthFace * heightFace;
+
+        const centerX = (Math.max(...xs) + Math.min(...xs)) / 2;
+        const centerY = (Math.max(...ys) + Math.min(...ys)) / 2;
+        const centerDist = Math.hypot(centerX - 0.5, centerY - 0.5);
+
+        const avgZ = landmarks.reduce((acc, lm) => acc + lm.z, 0) / landmarks.length;
+
+        const score = area * 0.5 - centerDist * 0.3 - avgZ * 0.2;
+        if (score > bestScore) {
+          bestScore = score;
           bestFaceIndex = i;
         }
       });
@@ -109,14 +131,18 @@ export default function FaceDetector() {
 
       if (showPointsRef.current) {
         animatePoints(mainFace);
+      } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+        ctx.restore();
       }
     });
 
-    const camera = new Camera(videoRef.current, {
+    const camera = new Camera(video, {
       onFrame: async () => {
-        if (videoRef.current && videoRef.current.readyState >= 2) {
-          await faceMesh.send({ image: videoRef.current });
-        }
+        if (video.readyState >= 2) await faceMesh.send({ image: video });
       },
       width: 640,
       height: 480,
@@ -135,18 +161,22 @@ export default function FaceDetector() {
       <div className="relative">
         <video
           ref={videoRef}
-          className="w-[640px] h-[480px] object-cover rounded-lg"
+          className="object-cover rounded-lg"
           autoPlay
           playsInline
+          style={{ width: 640, height: 480, transform: 'scaleX(-1)' }}
         />
         <canvas
           ref={canvasRef}
-          className="absolute top-0 left-0 w-[640px] h-[480px] rounded-lg pointer-events-none"
+          className="absolute top-0 left-0 pointer-events-none rounded-lg"
+          style={{ width: 640, height: 480 }}
         />
       </div>
 
       <p
-        className={`mt-4 text-xl font-bold ${faceDetectedState ? 'text-green-400' : 'text-red-400'}`}
+        className={`mt-4 text-xl font-bold ${
+          faceDetectedState ? 'text-green-400' : 'text-red-400'
+        }`}
       >
         {faceDetectedState ? 'Rostro detectado ✅' : 'No se detecta rostro ❌'}
       </p>
