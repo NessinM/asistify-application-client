@@ -1,306 +1,197 @@
 import { useEffect, useRef } from 'react';
 import { Camera } from '@mediapipe/camera_utils';
-import { FaceMesh, Results, NormalizedLandmark } from '@mediapipe/face_mesh';
-import { SelfieSegmentation } from '@mediapipe/selfie_segmentation';
-
-/** --- One Euro Filter --- */
-class OneEuroFilter {
-  private freq: number;
-  private minCutoff: number;
-  private beta: number;
-  private dCutoff: number;
-  private xPrev: number | null = null;
-  private dxPrev: number | null = null;
-  private tPrev: number | null = null;
-
-  constructor(freq = 30, minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
-    this.freq = freq;
-    this.minCutoff = minCutoff;
-    this.beta = beta;
-    this.dCutoff = dCutoff;
-  }
-
-  private alpha(cutoff: number, te: number) {
-    const tau = 1.0 / (2 * Math.PI * cutoff);
-    return 1.0 / (1.0 + tau / te);
-  }
-
-  filter(value: number, t: number) {
-    if (this.tPrev == null) {
-      this.tPrev = t;
-      this.xPrev = value;
-      this.dxPrev = 0;
-      return value;
-    }
-    const te = t - this.tPrev;
-    this.tPrev = t;
-
-    const dx = (value - (this.xPrev ?? value)) / te;
-    const alphaD = this.alpha(this.dCutoff, te);
-    const dxHat = alphaD * dx + (1 - alphaD) * (this.dxPrev ?? dx);
-    this.dxPrev = dxHat;
-
-    const cutoff = this.minCutoff + this.beta * Math.abs(dxHat);
-    const alphaX = this.alpha(cutoff, te);
-    const xHat = alphaX * value + (1 - alphaX) * (this.xPrev ?? value);
-    this.xPrev = xHat;
-
-    return xHat;
-  }
-}
+import { FaceMesh, Results } from '@mediapipe/face_mesh';
 
 interface FaceDetectorProps {
   width?: number;
   height?: number;
   maxFaces?: number;
-  minDetectionConfidence?: number;
-  minTrackingConfidence?: number;
   showPoints?: boolean;
   modelBasePath?: string;
-  enableBlur?: boolean;
-  onFaceDetected?: (data: {
-    centered: boolean;
-    centerX: number;
-    centerY: number;
-    distanceFromCenter: number;
-    boundingBox: { x: number; y: number; w: number; h: number };
-    pose: { pitch: number; yaw: number; roll: number };
-    landmarks: NormalizedLandmark[];
-  }) => void;
+  onFaceDetected?: (data: Results) => void;
 }
 
 export default function FaceDetector({
   width = 640,
   height = 480,
   maxFaces = 1,
-  minDetectionConfidence = 0.85,
-  minTrackingConfidence = 0.85,
   showPoints = true,
   modelBasePath = '/models/mediapipe',
-  enableBlur = true,
   onFaceDetected,
 }: FaceDetectorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const faceDetectedRef = useRef(false);
-  const filtersRef = useRef<OneEuroFilter[][]>([]);
-  const segmentationMaskRef = useRef<any>(null);
-
   useEffect(() => {
     if (!videoRef.current || !canvasRef.current) return;
+
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const gl = canvas.getContext('webgl');
+    if (!gl) return;
 
-    video.width = width;
-    video.height = height;
     canvas.width = width;
     canvas.height = height;
 
-    // ---- Selfie Segmentation ----
-    const selfieSegmentation = new SelfieSegmentation({
-      locateFile: (file) => `${modelBasePath}/selfie_segmentation/${file}`,
-    });
-    selfieSegmentation.setOptions({ modelSelection: 1 });
+    // --- Shaders ---
+    const vsVideo = `
+      attribute vec2 a_position;
+      attribute vec2 a_texCoord;
+      varying vec2 v_texCoord;
+      void main() {
+        gl_Position = vec4(a_position, 0, 1);
+        v_texCoord = a_texCoord;
+      }
+    `;
+    const fsVideo = `
+      precision mediump float;
+      varying vec2 v_texCoord;
+      uniform sampler2D u_texture;
+      void main() {
+        gl_FragColor = texture2D(u_texture, vec2(v_texCoord.x, 1.0 - v_texCoord.y));
 
-    selfieSegmentation.onResults((results) => {
-      segmentationMaskRef.current = results.segmentationMask;
-    });
+      }
+    `;
+    const vsPoints = `
+      attribute vec2 a_position;
+      uniform float u_pointSize;
+      void main() {
+        gl_Position = vec4(a_position, 0, 1);
+        gl_PointSize = u_pointSize;
+      }
+    `;
+    const fsPoints = `
+      precision mediump float;
+      void main() {
+        vec2 coord = gl_PointCoord - vec2(0.5);
+        if(length(coord) > 0.5) discard;
+        gl_FragColor = vec4(0.078, 0.619, 0.639, 1.0);
+      }
+    `;
 
-    // ---- FaceMesh ----
+    function createShader(gl: WebGLRenderingContext, type: number, source: string) {
+      const shader = gl.createShader(type)!;
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(shader));
+      }
+      return shader;
+    }
+
+    function createProgram(gl: WebGLRenderingContext, vsSrc: string, fsSrc: string) {
+      const vs = createShader(gl, gl.VERTEX_SHADER, vsSrc);
+      const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+      const prog = gl.createProgram()!;
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(prog));
+      }
+      return prog;
+    }
+
+    const videoProgram = createProgram(gl, vsVideo, fsVideo);
+    const pointsProgram = createProgram(gl, vsPoints, fsPoints);
+
+    // --- Buffers fijos ---
+    const posBuffer = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+
+    const texBuffer = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, texBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([1, 1, 0, 1, 1, 0, 0, 0]), gl.STATIC_DRAW);
+
+    const texture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+    const pointBuffer = gl.createBuffer()!; // buffer único para puntos
+
+    // --- FaceMesh ---
     const faceMesh = new FaceMesh({
       locateFile: (file) => `${modelBasePath}/face_mesh/${file}`,
     });
-    faceMesh.setOptions({
-      selfieMode: true,
-      maxNumFaces: maxFaces,
-      refineLandmarks: true,
-      minDetectionConfidence,
-      minTrackingConfidence,
-    });
-
-    let frameCount = 0;
+    faceMesh.setOptions({ selfieMode: true, maxNumFaces: maxFaces, refineLandmarks: true });
 
     faceMesh.onResults((results: Results) => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      gl.viewport(0, 0, width, height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
 
-      const multiFaces = results.multiFaceLandmarks || [];
+      // --- Dibujar video ---
+      gl.useProgram(videoProgram);
+      const posLoc = gl.getAttribLocation(videoProgram, 'a_position');
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
 
-      if (enableBlur) {
-        if (multiFaces.length === 0) {
-          // 🔹 Caso: no hay cara → todo blur
-          ctx.save();
-          ctx.filter = 'blur(12px)';
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          ctx.restore();
-          return; // no seguimos con máscara ni landmarks
-        }
+      const texLoc = gl.getAttribLocation(videoProgram, 'a_texCoord');
+      gl.bindBuffer(gl.ARRAY_BUFFER, texBuffer);
+      gl.enableVertexAttribArray(texLoc);
+      gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, 0);
 
-        // 🔹 Caso: sí hay cara → fondo blur + persona nítida
-        ctx.save();
-        ctx.filter = 'blur(12px)';
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        ctx.restore();
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+      const uTexture = gl.getUniformLocation(videoProgram, 'u_texture');
+      gl.uniform1i(uTexture, 0);
 
-        if (segmentationMaskRef.current) {
-          ctx.save();
-          ctx.globalCompositeOperation = 'destination-out';
-          ctx.filter = 'blur(6px)';
-          ctx.drawImage(segmentationMaskRef.current, 0, 0, canvas.width, canvas.height);
-          ctx.restore();
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-          ctx.save();
-          ctx.globalCompositeOperation = 'destination-over';
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          ctx.restore();
-          ctx.globalCompositeOperation = 'source-over';
-        }
-      } else {
-        // 🔹 Caso: desenfoque desactivado → video limpio siempre
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // --- Dibujar landmarks ---
+      if (showPoints && results.multiFaceLandmarks?.[0]) {
+        gl.useProgram(pointsProgram);
+        const landmarks = results.multiFaceLandmarks[0];
+        const aspect = width / height;
+          const vertices = landmarks.flatMap((lm) => [
+            (lm.x * 2 - 1) * aspect,
+            1 - lm.y * 2,
+          ]);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STREAM_DRAW);
+
+        const aPosition = gl.getAttribLocation(pointsProgram, 'a_position');
+        gl.enableVertexAttribArray(aPosition);
+        gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
+
+        const uPointSize = gl.getUniformLocation(pointsProgram, 'u_pointSize');
+        gl.uniform1f(uPointSize, Math.max(width, height) / 300);
+
+
+        gl.drawArrays(gl.POINTS, 0, vertices.length / 2);
       }
 
-      // Paso 2: Persona nítida con borde suave
-      if (segmentationMaskRef.current) {
-        ctx.save();
-        ctx.globalAlpha = 0.95;
-        ctx.globalCompositeOperation = 'destination-out';
-        if (enableBlur) ctx.filter = 'blur(6px)';
-        ctx.drawImage(segmentationMaskRef.current, 0, 0, canvas.width, canvas.height);
-        ctx.restore();
-
-        ctx.save();
-        ctx.globalCompositeOperation = 'destination-over';
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        ctx.restore();
-        ctx.globalCompositeOperation = 'source-over';
-      }
-
-      // Paso 3: detección facial
-      // const multiFaces = results.multiFaceLandmarks || [];
-      if (multiFaces.length === 0) {
-        faceDetectedRef.current = false;
-        return;
-      }
-
-      const mainFace = multiFaces[0];
-      faceDetectedRef.current = true;
-
-      if (filtersRef.current.length !== mainFace.length) {
-        filtersRef.current = mainFace.map(() => [
-          new OneEuroFilter(),
-          new OneEuroFilter(),
-          new OneEuroFilter(),
-        ]);
-      }
-
-      const t = performance.now() / 1000;
-      const smoothed = mainFace.map((lm, i) => ({
-        x: filtersRef.current[i][0].filter(lm.x, t),
-        y: filtersRef.current[i][1].filter(lm.y, t),
-        z: filtersRef.current[i][2].filter(lm.z, t),
-      }));
-
-      if (showPoints) {
-        ctx.fillStyle = 'rgba(20,158,163,0.9)';
-        smoothed.forEach((lm) => {
-          const x = (1 - lm.x) * canvas.width;
-          const y = lm.y * canvas.height;
-          ctx.beginPath();
-          ctx.arc(x, y, 1.0, 0, Math.PI * 2);
-          ctx.fill();
-        });
-      }
-
-      const xs = smoothed.map((lm) => 1 - lm.x);
-      const ys = smoothed.map((lm) => lm.y);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-      const centerX = (minX + maxX) / 2;
-      const centerY = (minY + maxY) / 2;
-      const distanceFromCenter = Math.hypot(centerX - 0.5, centerY - 0.5);
-      const centered = distanceFromCenter < 0.1;
-
-      const boundingBox = {
-        x: minX,
-        y: minY,
-        w: maxX - minX,
-        h: maxY - minY,
-      };
-
-      const leftEye = smoothed[33];
-      const rightEye = smoothed[263];
-      const nose = smoothed[1];
-      const dx = rightEye.x - leftEye.x;
-      const dy = rightEye.y - leftEye.y;
-      const yaw = Math.atan2(dx, dy);
-      const pitch = (nose.y - centerY) * 30;
-      const roll = (nose.x - centerX) * 30;
-
-      onFaceDetected?.({
-        centered,
-        centerX,
-        centerY,
-        distanceFromCenter,
-        boundingBox,
-        pose: { pitch, yaw, roll },
-        landmarks: smoothed,
-      });
+      onFaceDetected?.(results);
     });
 
+    // --- Cámara ---
     const camera = new Camera(video, {
       onFrame: async () => {
-        if (video.readyState >= 2) {
-          frameCount++;
-          if (frameCount % 3 === 0) {
-            await selfieSegmentation.send({ image: video });
-          }
-          await faceMesh.send({ image: video });
-        }
+        if (video.readyState >= 2) await faceMesh.send({ image: video });
       },
       width,
       height,
     });
-
     camera.start();
 
     return () => {
       camera.stop();
       faceMesh.close();
-      selfieSegmentation.close();
-      filtersRef.current = [];
-      segmentationMaskRef.current = null;
     };
-  }, [
-    width,
-    height,
-    maxFaces,
-    minDetectionConfidence,
-    minTrackingConfidence,
-    onFaceDetected,
-    showPoints,
-    modelBasePath,
-    enableBlur,
-  ]);
+  }, [width, height, maxFaces, modelBasePath, showPoints, onFaceDetected]);
 
   return (
-    <div className="relative">
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        style={{ width, height, transform: 'scaleX(-1)' }}
-        className="object-cover rounded-lg"
-      />
-      <canvas
-        ref={canvasRef}
-        className="absolute top-0 left-0 pointer-events-none rounded-lg"
-        style={{ width, height, transform: 'scaleX(-1)' }}
-      />
+    <div>
+      <video ref={videoRef} autoPlay playsInline style={{ display: 'none' }} />
+      <canvas ref={canvasRef} width={width} height={height} />
     </div>
   );
 }
