@@ -32,6 +32,7 @@ export default function FaceDetector({
 
     canvas.width = width;
     canvas.height = height;
+    gl.viewport(0, 0, width, height);
 
     // --- Shaders ---
     const vsVideo = `
@@ -43,15 +44,16 @@ export default function FaceDetector({
         v_texCoord = a_texCoord;
       }
     `;
+
     const fsVideo = `
       precision mediump float;
       varying vec2 v_texCoord;
       uniform sampler2D u_texture;
       void main() {
-        gl_FragColor = texture2D(u_texture, vec2(v_texCoord.x, 1.0 - v_texCoord.y));
-
+        gl_FragColor = texture2D(u_texture, vec2(v_texCoord.x,  v_texCoord.y));
       }
     `;
+
     const vsPoints = `
       attribute vec2 a_position;
       uniform float u_pointSize;
@@ -60,6 +62,7 @@ export default function FaceDetector({
         gl_PointSize = u_pointSize;
       }
     `;
+
     const fsPoints = `
       precision mediump float;
       void main() {
@@ -95,7 +98,7 @@ export default function FaceDetector({
     const videoProgram = createProgram(gl, vsVideo, fsVideo);
     const pointsProgram = createProgram(gl, vsPoints, fsPoints);
 
-    // --- Buffers fijos ---
+    // --- Buffers ---
     const posBuffer = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
@@ -110,9 +113,9 @@ export default function FaceDetector({
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
 
-    const pointBuffer = gl.createBuffer()!; // buffer único para puntos
+    const pointBuffer = gl.createBuffer()!;
 
     // --- FaceMesh ---
     const faceMesh = new FaceMesh({
@@ -121,12 +124,12 @@ export default function FaceDetector({
     faceMesh.setOptions({ selfieMode: true, maxNumFaces: maxFaces, refineLandmarks: true });
 
     faceMesh.onResults((results: Results) => {
-      gl.viewport(0, 0, width, height);
-      gl.clearColor(0, 0, 0, 0);
+      gl.clearColor(0, 0, 0, 1); // fondo opaco
       gl.clear(gl.COLOR_BUFFER_BIT);
 
       // --- Dibujar video ---
       gl.useProgram(videoProgram);
+
       const posLoc = gl.getAttribLocation(videoProgram, 'a_position');
       gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
       gl.enableVertexAttribArray(posLoc);
@@ -149,11 +152,11 @@ export default function FaceDetector({
       if (showPoints && results.multiFaceLandmarks?.[0]) {
         gl.useProgram(pointsProgram);
         const landmarks = results.multiFaceLandmarks[0];
-        const aspect = width / height;
-          const vertices = landmarks.flatMap((lm) => [
-            (lm.x * 2 - 1) * aspect,
-            1 - lm.y * 2,
-          ]);
+
+        const vertices = landmarks.flatMap((lm) => [
+          lm.x * 2 - 1, // x normalizado
+          -(lm.y * 2 - 1), // y invertido
+        ]);
 
         gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STREAM_DRAW);
@@ -162,9 +165,10 @@ export default function FaceDetector({
         gl.enableVertexAttribArray(aPosition);
         gl.vertexAttribPointer(aPosition, 2, gl.FLOAT, false, 0, 0);
 
+        // tamaño proporcional al canvas (como antes)
+        const scale = Math.max(width, height) / 250;
         const uPointSize = gl.getUniformLocation(pointsProgram, 'u_pointSize');
-        gl.uniform1f(uPointSize, Math.max(width, height) / 300);
-
+        gl.uniform1f(uPointSize, scale);
 
         gl.drawArrays(gl.POINTS, 0, vertices.length / 2);
       }
